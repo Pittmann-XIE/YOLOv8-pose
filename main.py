@@ -200,7 +200,7 @@ def test(args, params, model=None):
                              pin_memory=True, collate_fn=Dataset.collate_fn)
 
     if model is None:
-        model = torch.load('./weights/best.pt', map_location='cuda')['model'].float()
+        model = torch.load('./weights/best.pt', map_location='cuda', weights_only=False)['model'].float()
 
     model.half()
     model.eval()
@@ -273,6 +273,225 @@ def test(args, params, model=None):
         tp, fp, m_pre, m_rec, map50, kpt_mean_ap = util.compute_ap(*kpt_metrics)
     # Print results
     print('%10.3g' * 2 % (box_mean_ap, kpt_mean_ap))
+
+    # Return results
+    model.float()  # for training
+    return box_mean_ap, kpt_mean_ap
+
+
+@torch.no_grad()
+def test_save(args, params, model=None):
+    import cv2
+    import os
+    
+    # Create output directory if it doesn't exist
+    output_dir = "./Dataset/output/"
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    
+    # Pose visualization settings (same as in demo function)
+    palette = numpy.array([[255, 128, 0], [255, 153, 51], [255, 178, 102], [230, 230, 0], [255, 153, 255],
+                           [153, 204, 255], [255, 102, 255], [255, 51, 255], [102, 178, 255], [51, 153, 255],
+                           [255, 153, 153], [255, 102, 102], [255, 51, 51], [153, 255, 153], [102, 255, 102],
+                           [51, 255, 51], [0, 255, 0], [0, 0, 255], [255, 0, 0], [255, 255, 255]],
+                          dtype=numpy.uint8)
+    skeleton = [[16, 14], [14, 12], [17, 15], [15, 13], [12, 13], [6, 12], [7, 13], [6, 7], [6, 8], [7, 9],
+                [8, 10], [9, 11], [2, 3], [1, 2], [1, 3], [2, 4], [3, 5], [4, 6], [5, 7]]
+    kpt_color = palette[[16, 16, 16, 16, 16, 0, 0, 0, 0, 0, 0, 9, 9, 9, 9, 9, 9]]
+    limb_color = palette[[9, 9, 9, 9, 7, 7, 7, 0, 0, 0, 0, 0, 16, 16, 16, 16, 16, 16, 16]]
+    
+    # Load filenames and original images
+    filenames = []
+    original_images = []
+    with open('./Dataset/labels/coco-pose/val2017.txt') as reader:
+        for filename in reader.readlines():
+            filename = filename.rstrip().split('/')[-1]
+            image_path = './Dataset/images/val2017/' + filename
+            filenames.append(image_path)
+            # Load original image for visualization
+            original_img = cv2.imread(image_path)
+            original_images.append(original_img)
+    
+    numpy.random.seed(42)  # For reproducible results
+    indices = numpy.random.choice(len(filenames), min(100, len(filenames)), replace=False)
+    filenames = [filenames[i] for i in indices]
+    original_images = [original_images[i] for i in indices]
+    
+    dataset = Dataset(filenames, args.input_size, params, False)
+    loader = data.DataLoader(dataset, 1, False, num_workers=4,  # batch_size=1 for easier processing
+                             pin_memory=True, collate_fn=Dataset.collate_fn)
+
+    if model is None:
+        model = torch.load('./weights/best.pt', map_location='cuda', weights_only=False)['model'].float()
+    print('model loaded')
+
+
+    model.half()
+    model.eval()
+
+    # Configure
+    iou_v = torch.linspace(0.5, 0.95, 10).cuda()  # iou vector for mAP@0.5:0.95
+    n_iou = iou_v.numel()
+
+    box_mean_ap = 0.
+    kpt_mean_ap = 0.
+    box_metrics = []
+    kpt_metrics = []
+    
+    image_idx = 0
+    p_bar = tqdm.tqdm(loader, desc=('%10s' * 2) % ('BoxAP', 'PoseAP'))
+    
+    for samples, targets in p_bar:
+        if image_idx >= len(original_images):
+            break
+            
+        samples = samples.cuda()
+        samples = samples.half()  # uint8 to fp16/32
+        samples = samples / 255  # 0 - 255 to 0.0 - 1.0
+        _, _, h, w = samples.shape  # batch size, channels, height, width
+        scale = torch.tensor((w, h, w, h)).cuda()
+        
+        # Get original image for visualization
+        original_img = original_images[image_idx].copy()
+        original_shape = original_img.shape[:2]  # (height, width)
+        
+        # Inference
+        outputs = model(samples)
+        # NMS
+        outputs = util.non_max_suppression(outputs, 0.001, 0.7, model.head.nc)
+        
+        # Metrics calculation (same as original test function)
+        for i, output in enumerate(outputs):
+            idx = targets['idx'] == i
+            cls = targets['cls'][idx]
+            box = targets['box'][idx]
+            kpt = targets['kpt'][idx]
+
+            cls = cls.cuda()
+            box = box.cuda()
+            kpt = kpt.cuda()
+
+            correct_box = torch.zeros(output.shape[0], n_iou, dtype=torch.bool).cuda()
+            correct_kpt = torch.zeros(output.shape[0], n_iou, dtype=torch.bool).cuda()
+
+            if output.shape[0] == 0:
+                if cls.shape[0]:
+                    box_metrics.append((correct_box,
+                                        *torch.zeros((2, 0)).cuda(), cls.squeeze(-1)))
+                    kpt_metrics.append((correct_kpt,
+                                        *torch.zeros((2, 0)).cuda(), cls.squeeze(-1)))
+                continue
+
+            # Predictions
+            pred = output.clone()
+            p_kpt = pred[:, 6:].view(output.shape[0], kpt.shape[1], -1)
+
+            # Evaluate
+            if cls.shape[0]:
+                t_box = util.wh2xy(box)
+                t_kpt = kpt.clone()
+                t_kpt[..., 0] *= w
+                t_kpt[..., 1] *= h
+
+                target = torch.cat((cls, t_box * scale), 1)
+                correct_box = util.compute_metric(pred[:, :6], target, iou_v)
+                correct_kpt = util.compute_metric(pred[:, :6], target, iou_v, p_kpt, t_kpt)
+            
+            box_metrics.append((correct_box, output[:, 4], output[:, 5], cls.squeeze(-1)))
+            kpt_metrics.append((correct_kpt, output[:, 4], output[:, 5], cls.squeeze(-1)))
+
+            # Visualization - transform predictions back to original image coordinates
+            if len(output) > 0:
+                # Scale predictions back to original image size
+                r = min(args.input_size / original_shape[0], args.input_size / original_shape[1])
+                
+                # Process box predictions
+                box_output = output[:, :6].clone()
+                box_output[:, [0, 2]] -= (args.input_size - original_shape[1] * r) / 2  # x padding
+                box_output[:, [1, 3]] -= (args.input_size - original_shape[0] * r) / 2  # y padding
+                box_output[:, :4] /= r
+
+                box_output[:, 0].clamp_(0, original_shape[1])  # x
+                box_output[:, 1].clamp_(0, original_shape[0])  # y
+                box_output[:, 2].clamp_(0, original_shape[1])  # x
+                box_output[:, 3].clamp_(0, original_shape[0])  # y
+
+                # Process keypoint predictions
+                kps_output = output[:, 6:].view(len(output), -1, 3)  # Assuming 3 values per keypoint (x, y, confidence)
+                kps_output[..., 0] -= (args.input_size - original_shape[1] * r) / 2  # x padding
+                kps_output[..., 1] -= (args.input_size - original_shape[0] * r) / 2  # y padding
+                kps_output[..., 0] /= r
+                kps_output[..., 1] /= r
+                kps_output[..., 0].clamp_(0, original_shape[1])  # x
+                kps_output[..., 1].clamp_(0, original_shape[0])  # y
+
+                # Draw bounding boxes
+                for box in box_output:
+                    box = box.cpu().numpy()
+                    x1, y1, x2, y2, score, index = box
+                    if score > 0.5:  # Only draw high confidence boxes
+                        cv2.rectangle(original_img,
+                                      (int(x1), int(y1)),
+                                      (int(x2), int(y2)),
+                                      (0, 255, 0), 2)
+                        cv2.putText(original_img, f'{score:.2f}', 
+                                   (int(x1), int(y1) - 10),
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
+                # Draw keypoints and skeleton
+                for kpt in kps_output:
+                    kpt = kpt.cpu().numpy()
+                    # Draw keypoints
+                    for i, k in enumerate(kpt):
+                        if i < len(kpt_color):
+                            color_k = [int(x) for x in kpt_color[i]]
+                            x_coord, y_coord = k[0], k[1]
+                            if len(k) == 3:
+                                conf = k[2]
+                                if conf < 0.5:
+                                    continue
+                            if 0 <= x_coord <= original_shape[1] and 0 <= y_coord <= original_shape[0]:
+                                cv2.circle(original_img,
+                                           (int(x_coord), int(y_coord)),
+                                           5, color_k, -1, lineType=cv2.LINE_AA)
+                    
+                    # Draw skeleton
+                    for i, sk in enumerate(skeleton):
+                        if sk[0] - 1 < len(kpt) and sk[1] - 1 < len(kpt):
+                            pos1 = (int(kpt[sk[0] - 1, 0]), int(kpt[sk[0] - 1, 1]))
+                            pos2 = (int(kpt[sk[1] - 1, 0]), int(kpt[sk[1] - 1, 1]))
+                            
+                            if len(kpt[0]) == 3:
+                                conf1 = kpt[sk[0] - 1, 2]
+                                conf2 = kpt[sk[1] - 1, 2]
+                                if conf1 < 0.5 or conf2 < 0.5:
+                                    continue
+                            
+                            if (0 <= pos1[0] <= original_shape[1] and 0 <= pos1[1] <= original_shape[0] and
+                                0 <= pos2[0] <= original_shape[1] and 0 <= pos2[1] <= original_shape[0]):
+                                cv2.line(original_img,
+                                         pos1, pos2,
+                                         [int(x) for x in limb_color[i]],
+                                         thickness=2, lineType=cv2.LINE_AA)
+
+        # Save the visualized image
+        filename = os.path.basename(filenames[image_idx])
+        output_path = os.path.join(output_dir, f"pose_{filename}")
+        cv2.imwrite(output_path, original_img)
+        
+        image_idx += 1
+
+    # Compute metrics (same as original test function)
+    box_metrics = [torch.cat(x, 0).cpu().numpy() for x in zip(*box_metrics)]
+    kpt_metrics = [torch.cat(x, 0).cpu().numpy() for x in zip(*kpt_metrics)]
+    if len(box_metrics) and box_metrics[0].any():
+        tp, fp, m_pre, m_rec, map50, box_mean_ap = util.compute_ap(*box_metrics)
+    if len(kpt_metrics) and kpt_metrics[0].any():
+        tp, fp, m_pre, m_rec, map50, kpt_mean_ap = util.compute_ap(*kpt_metrics)
+    
+    # Print results
+    print('%10.3g' * 2 % (box_mean_ap, kpt_mean_ap))
+    print(f"Saved {image_idx} images with pose estimations to {output_dir}")
 
     # Return results
     model.float()  # for training
@@ -434,6 +653,8 @@ def main():
     parser.add_argument('--epochs', default=1000, type=int)
     parser.add_argument('--train', action='store_true')
     parser.add_argument('--test', action='store_true')
+    parser.add_argument('--test_save', action='store_true')
+
     parser.add_argument('--demo', action='store_true')
 
     args = parser.parse_args()
@@ -459,6 +680,8 @@ def main():
         train(args, params)
     if args.test:
         test(args, params)
+    if args.test_save:
+        test_save(args, params)
     if args.demo:
         demo(args)
 

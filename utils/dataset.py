@@ -234,7 +234,7 @@ class Dataset(data.Dataset):
 
         path = f'{os.path.dirname(filenames[0])}.cache'
         if os.path.exists(path):
-            return torch.load(path)
+            return torch.load(path, weights_only=False)
         x = {}
         for filename in filenames:
             try:
