@@ -1,1 +1,12 @@
 Dataset/
+/outputs
+/outputs_*
+/output_mediapipe
+*.mp4
+*.webm
+*.pt
+*.log
+*.raw
+*.tmp_index
+*.csv
+*.jpg

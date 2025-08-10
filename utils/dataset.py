@@ -233,8 +233,8 @@ class Dataset(data.Dataset):
         num_dim = params['kpt_shape'][1]
 
         path = f'{os.path.dirname(filenames[0])}.cache'
-        if os.path.exists(path):
-            return torch.load(path, weights_only=False)
+        # if os.path.exists(path):
+        #     return torch.load(path, weights_only=False)
         x = {}
         for filename in filenames:
             try:

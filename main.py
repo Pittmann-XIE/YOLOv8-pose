@@ -26,7 +26,7 @@ def learning_rate(args, params):
 
 def train(args, params):
     # Model
-    model = nn.yolo_v8_n(len(params['names']))
+    model = nn.yolo_v8_m(len(params['names']))
     model.cuda()
 
     # Optimizer
@@ -56,10 +56,10 @@ def train(args, params):
     ema = util.EMA(model) if args.local_rank == 0 else None
 
     filenames = []
-    with open('./Dataset/coco-pose/train2017.txt') as reader:
+    with open('/home/xie/possestimationeventcamera/DHP19/yolo_dataset_640x640/train.txt') as reader:
         for filename in reader.readlines():
             filename = filename.rstrip().split('/')[-1]
-            filenames.append('./' + filename)
+            filenames.append('/home/xie/possestimationeventcamera/DHP19/yolo_dataset_640x640/train/images/' + filename)
 
     dataset = Dataset(filenames, args.input_size, params, True)
 
@@ -84,7 +84,7 @@ def train(args, params):
     amp_scale = torch.cuda.amp.GradScaler()
     criterion = util.ComputeLoss(model, params)
     num_warmup = max(round(params['warmup_epochs'] * num_batch), 1000)
-    with open('weights/step.csv', 'w') as f:
+    with open('weights/step_m_dhp19.csv', 'w') as f:
         if args.local_rank == 0:
             writer = csv.DictWriter(f, fieldnames=['epoch', 'BoxAP', 'PoseAP'])
             writer.writeheader()
@@ -175,14 +175,14 @@ def train(args, params):
                 ckpt = {'model': copy.deepcopy(ema.ema).half()}
 
                 # Save last, best and delete
-                torch.save(ckpt, './weights/last.pt')
+                torch.save(ckpt, './weights/last_m_dhp19.pt')
                 if best == last[1]:
-                    torch.save(ckpt, './weights/best.pt')
+                    torch.save(ckpt, './weights/best_m_dhp19.pt')
                 del ckpt
 
     if args.local_rank == 0:
-        util.strip_optimizer('./weights/best.pt')  # strip optimizers
-        util.strip_optimizer('./weights/last.pt')  # strip optimizers
+        util.strip_optimizer('./weights/best_m_dhp19.pt')  # strip optimizers
+        util.strip_optimizer('./weights/last_m_dhp19.pt')  # strip optimizers
 
     torch.cuda.empty_cache()
 
@@ -303,17 +303,17 @@ def test_save(args, params, model=None):
     # Load filenames and original images
     filenames = []
     original_images = []
-    # with open('./Dataset/coco8-pose/valv8.txt') as reader:
-    #     for filename in reader.readlines():
-    #         filename = filename.rstrip().split('/')[-1]
-    #         # print(filename)
-    #         image_path = './Dataset/coco8-pose/images/val' + filename
-    #         filenames.append(image_path)
-    #         # Load original image for visualization
-    #         original_img = cv2.imread(image_path)
-    #         original_images.append(original_img)
+    with open('./Dataset/coco8-pose/valv8.txt') as reader:
+        for filename in reader.readlines():
+            filename = filename.rstrip().split('/')[-1]
+            # print(filename)
+            image_path = './Dataset/coco8-pose/images/val/' + filename
+            filenames.append(image_path)
+            # Load original image for visualization
+            original_img = cv2.imread(image_path)
+            original_images.append(original_img)
 
-    filenames = ['/home/xie/YOLOv8-pose/Dataset/000000000063.jpg', '/home/xie/YOLOv8-pose/Dataset/right_augmented.jpg', '/home/xie/YOLOv8-pose/Dataset/right_augmented_more.jpg']
+    # filenames = ['/home/xie/YOLOv8-pose/Dataset/000000000063.jpg', '/home/xie/YOLOv8-pose/Dataset/right_augmented.jpg', '/home/xie/YOLOv8-pose/Dataset/right_augmented_more.jpg']
     # filenames = ['/home/xie/YOLOv8-pose/Dataset/right_augmented.jpg']
     # filenames = ['/home/xie/YOLOv8-pose/Dataset/right_augmented_more.jpg']
 
@@ -1007,15 +1007,16 @@ def main():
     with open('utils/args.yaml', errors='ignore') as f:
         params = yaml.safe_load(f)
     profile(args, params)
-    args.test_save = True
-    if args.train:
-        train(args, params)
-    if args.test:
-        test(args, params)
-    if args.test_save:
-        test_save(args, params)
-    if args.demo:
-        demo(args)
+    # args.test_save = True
+    # if args.train:
+    #     train(args, params)
+    # if args.test:
+    #     test(args, params)
+    # if args.test_save:
+    #     test_save(args, params)
+    # if args.demo:
+    #     demo(args)
+    train(args, params)
 
 
 if __name__ == "__main__":

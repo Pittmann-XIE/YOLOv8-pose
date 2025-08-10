@@ -275,7 +275,7 @@ def compute_iou(box1, box2, eps=1e-7):
 
 
 def strip_optimizer(filename):
-    x = torch.load(filename, map_location=torch.device('cpu'))
+    x = torch.load(filename, weights_only=False, map_location=torch.device('cpu'))
     x['model'].half()  # to FP16
     for p in x['model'].parameters():
         p.requires_grad = False
@@ -289,7 +289,7 @@ def clip_gradients(model, max_norm=10.0):
 
 def load_weight(ckpt, model):
     dst = model.state_dict()
-    src = torch.load(ckpt, 'cpu')['model'].float().state_dict()
+    src = torch.load(ckpt, 'cpu', weights_only=False)['model'].float().state_dict()
     ckpt = {}
     for k, v in src.items():
         if k in dst and v.shape == dst[k].shape:
